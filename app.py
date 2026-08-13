@@ -62,6 +62,10 @@ def get_existing_tables():
 
 TYPE_OPTIONS = ["VARCHAR(255)", "TEXT", "BIGINT", "DECIMAL(14,2)", "DATE", "DATETIME"]
 
+# Tablas "core" del proyecto de facturación — no se pueden usar como destino de carga
+# libre para evitar que se les metan datos que no correspondan por error.
+PROTECTED_TABLES = {"employer_groups", "invoices", "invoice_members", "ar_transactions"}
+
 
 def infer_sql_type(series: pd.Series) -> str:
     if pd.api.types.is_integer_dtype(series):
@@ -139,13 +143,20 @@ if uploaded_file:
     col_defs = []  # (nombre_original, nombre_final, tipo_sql) — solo para modo "tabla nueva"
 
     if mode == "Usar una tabla existente":
-        if not existing_tables:
-            st.warning("Todavía no hay tablas creadas. Elige 'Crear una tabla nueva'.")
+        selectable_tables = [t for t in existing_tables if t not in PROTECTED_TABLES]
+        if not selectable_tables:
+            st.warning("Todavía no hay tablas propias creadas. Elige 'Crear una tabla nueva'.")
             st.stop()
-        table_name = st.selectbox("Tabla existente", existing_tables)
+        table_name = st.selectbox("Tabla existente", selectable_tables)
         st.caption(
             "Los nombres de columna del archivo deben coincidir con los nombres de columna de la tabla."
         )
+        if PROTECTED_TABLES & set(existing_tables):
+            st.caption(
+                "🔒 Las tablas del sistema de facturación (`employer_groups`, `invoices`, "
+                "`invoice_members`, `ar_transactions`) no aparecen aquí a propósito, para evitar "
+                "cargar datos que no correspondan en ellas por error."
+            )
 
     else:
         raw_name = st.text_input("Nombre de la tabla nueva (ej. datos_agentes_2026)")
@@ -178,6 +189,13 @@ if uploaded_file:
     if st.button("Cargar a la base de datos", type="primary"):
         if not table_name:
             st.error("Falta el nombre de la tabla.")
+            st.stop()
+
+        if mode == "Crear una tabla nueva" and table_name in existing_tables:
+            st.error(
+                f"Ya existe una tabla llamada `{table_name}`. Elige otro nombre, o usa el modo "
+                f"'Usar una tabla existente' si tu intención es agregar datos a esa tabla."
+            )
             st.stop()
 
         try:
