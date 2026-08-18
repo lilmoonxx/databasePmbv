@@ -6,9 +6,36 @@ from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="Carga de Datos - Plan Médico Bella Vista", layout="wide")
 
-# =========================================================
-# Login básico (contraseña única, guardada en secrets)
-# =========================================================
+
+
+@st.cache_resource
+def get_engine():
+    cfg = st.secrets["mysql"]
+    url = (
+        f"mysql+pymysql://{cfg['user']}:{cfg['password']}"
+        f"@{cfg['host']}:{cfg['port']}/{cfg['database']}"
+    )
+    
+    return create_engine(url, pool_pre_ping=True, connect_args={"ssl": {"ssl": {}}})
+
+
+def get_existing_tables():
+    with get_engine().connect() as conn:
+        result = conn.execute(text("SHOW TABLES"))
+        return [row[0] for row in result]
+
+
+
+
+if st.query_params.get("health") is not None:
+    try:
+        get_existing_tables()
+        st.write("OK")
+    except Exception as e:
+        st.write(f"ERROR: {e}")
+    st.stop()
+
+
 
 
 def check_password():
@@ -31,39 +58,13 @@ def check_password():
 if not check_password():
     st.stop()
 
-# =========================================================
-# Conexión a MySQL (Aiven)
-# =========================================================
-
-
-@st.cache_resource
-def get_engine():
-    cfg = st.secrets["mysql"]
-    url = (
-        f"mysql+pymysql://{cfg['user']}:{cfg['password']}"
-        f"@{cfg['host']}:{cfg['port']}/{cfg['database']}"
-    )
-    # Aiven requiere SSL. pymysql lo negocia solo si le pasamos ssl={}.
-    return create_engine(url, pool_pre_ping=True, connect_args={"ssl": {"ssl": {}}})
-
-
 engine = get_engine()
 
 
-def get_existing_tables():
-    with engine.connect() as conn:
-        result = conn.execute(text("SHOW TABLES"))
-        return [row[0] for row in result]
-
-
-# =========================================================
-# Utilidades: inferencia de tipos y normalización de nombres
-# =========================================================
 
 TYPE_OPTIONS = ["VARCHAR(255)", "TEXT", "BIGINT", "DECIMAL(14,2)", "DATE", "DATETIME"]
 
-# Tablas "core" del proyecto de facturación — no se pueden usar como destino de carga
-# libre para evitar que se les metan datos que no correspondan por error.
+
 PROTECTED_TABLES = {"employer_groups", "invoices", "invoice_members", "ar_transactions"}
 
 
@@ -95,16 +96,23 @@ def sanitize_name(name: str) -> str:
     return name
 
 
-# =========================================================
-# UI
-# =========================================================
 
-st.title("📊 Carga de Datos — Plan Médico Bella Vista")
+
+st.title("Carga de Datos — Plan Médico Bella Vista")
 st.caption(
     "Sube un archivo Excel o CSV, revisa la vista previa, elige a dónde va y cárgalo a la base de datos."
 )
 
-uploaded_file = st.file_uploader("Archivo Excel o CSV", type=["csv", "xlsx", "xls"])
+# Contador para poder "resetear" el uploader sin recargar la página entera
+
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+uploaded_file = st.file_uploader(
+    "Archivo Excel o CSV",
+    type=["csv", "xlsx", "xls"],
+    key=f"uploader_{st.session_state.uploader_key}",
+)
 
 if uploaded_file:
     try:
@@ -213,10 +221,21 @@ if uploaded_file:
                     rename_map = {orig: cname for orig, cname, _ in col_defs}
                     df = df.rename(columns=rename_map)
 
-                df.to_sql(table_name, con=conn, if_exists="append", index=False)
+              
+                df.to_sql(
+                    table_name,
+                    con=conn,
+                    if_exists="append",
+                    index=False,
+                    chunksize=1000,
+                    method="multi",
+                )
 
             st.success(f"✅ {len(df)} filas cargadas en la tabla `{table_name}`.")
             st.balloons()
+            if st.button("⬆️ Subir otro archivo"):
+                st.session_state.uploader_key += 1
+                st.rerun()
         except Exception as e:
             st.error(f"Error al cargar los datos: {e}")
 
