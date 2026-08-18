@@ -8,6 +8,7 @@ st.set_page_config(page_title="Carga de Datos - Plan Médico Bella Vista", layou
 
 
 
+
 @st.cache_resource
 def get_engine():
     cfg = st.secrets["mysql"]
@@ -15,7 +16,7 @@ def get_engine():
         f"mysql+pymysql://{cfg['user']}:{cfg['password']}"
         f"@{cfg['host']}:{cfg['port']}/{cfg['database']}"
     )
-    
+   
     return create_engine(url, pool_pre_ping=True, connect_args={"ssl": {"ssl": {}}})
 
 
@@ -59,6 +60,7 @@ if not check_password():
     st.stop()
 
 engine = get_engine()
+
 
 
 
@@ -110,14 +112,20 @@ if "uploader_key" not in st.session_state:
 
 uploaded_file = st.file_uploader(
     "Archivo Excel o CSV",
-    type=["csv", "xlsx", "xls"],
+    type=["csv", "txt", "xlsx", "xls"],
     key=f"uploader_{st.session_state.uploader_key}",
 )
 
 if uploaded_file:
     try:
-        if uploaded_file.name.lower().endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
+        if uploaded_file.name.lower().endswith((".csv", ".txt")):
+           
+            try:
+                df = pd.read_csv(uploaded_file, sep=None, engine="python", encoding="utf-8")
+            except UnicodeDecodeError:
+               
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, sep=None, engine="python", encoding="latin1")
         else:
             df = pd.read_excel(uploaded_file)
     except Exception as e:
@@ -221,7 +229,6 @@ if uploaded_file:
                     rename_map = {orig: cname for orig, cname, _ in col_defs}
                     df = df.rename(columns=rename_map)
 
-              
                 df.to_sql(
                     table_name,
                     con=conn,
