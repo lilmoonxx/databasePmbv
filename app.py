@@ -7,8 +7,6 @@ from sqlalchemy import create_engine, text
 st.set_page_config(page_title="Carga de Datos - Plan Médico Bella Vista", layout="wide")
 
 
-
-
 @st.cache_resource
 def get_engine():
     cfg = st.secrets["mysql"]
@@ -16,7 +14,6 @@ def get_engine():
         f"mysql+pymysql://{cfg['user']}:{cfg['password']}"
         f"@{cfg['host']}:{cfg['port']}/{cfg['database']}"
     )
-   
     return create_engine(url, pool_pre_ping=True, connect_args={"ssl": {"ssl": {}}})
 
 
@@ -26,6 +23,10 @@ def get_existing_tables():
         return [row[0] for row in result]
 
 
+def get_table_columns(table_name):
+    with get_engine().connect() as conn:
+        result = conn.execute(text(f"SHOW COLUMNS FROM `{table_name}`"))
+        return [row[0] for row in result]
 
 
 if st.query_params.get("health") is not None:
@@ -35,8 +36,6 @@ if st.query_params.get("health") is not None:
     except Exception as e:
         st.write(f"ERROR: {e}")
     st.stop()
-
-
 
 
 def check_password():
@@ -61,11 +60,7 @@ if not check_password():
 
 engine = get_engine()
 
-
-
-
 TYPE_OPTIONS = ["VARCHAR(255)", "TEXT", "BIGINT", "DECIMAL(14,2)", "DATE", "DATETIME"]
-
 
 PROTECTED_TABLES = {"employer_groups", "invoices", "invoice_members", "ar_transactions"}
 
@@ -98,14 +93,10 @@ def sanitize_name(name: str) -> str:
     return name
 
 
-
-
 st.title("Carga de Datos — Plan Médico Bella Vista")
 st.caption(
     "Sube un archivo Excel o CSV, revisa la vista previa, elige a dónde va y cárgalo a la base de datos."
 )
-
-# Contador para poder "resetear" el uploader sin recargar la página entera
 
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
@@ -119,11 +110,9 @@ uploaded_file = st.file_uploader(
 if uploaded_file:
     try:
         if uploaded_file.name.lower().endswith((".csv", ".txt")):
-           
             try:
                 df = pd.read_csv(uploaded_file, sep=None, engine="python", encoding="utf-8")
             except UnicodeDecodeError:
-               
                 uploaded_file.seek(0)
                 df = pd.read_csv(uploaded_file, sep=None, engine="python", encoding="latin1")
         else:
@@ -136,27 +125,16 @@ if uploaded_file:
     st.dataframe(df.head(20), use_container_width=True)
     st.caption(f"{len(df)} filas · {len(df.columns)} columnas detectadas en el archivo.")
 
-    st.subheader("2. ¿Qué columnas quieres cargar?")
-    cols_to_include = st.multiselect(
-        "Desmarca las columnas que NO quieras subir a la base (ej. SSN u otro dato sensible).",
-        options=list(df.columns),
-        default=list(df.columns),
-    )
-    if not cols_to_include:
-        st.warning("Selecciona al menos una columna para continuar.")
-        st.stop()
-    df = df[cols_to_include]
-
-    st.subheader("3. ¿Dónde quieres cargar estos datos?")
+    st.subheader("2. ¿Dónde quieres cargar estos datos?")
     mode = st.radio(
         "Destino",
-        ["Crear una tabla nueva", "Usar una tabla existente"],
+        ["Usar una tabla existente", "Crear una tabla nueva"],
         label_visibility="collapsed",
     )
 
     existing_tables = get_existing_tables()
     table_name = None
-    col_defs = []  # (nombre_original, nombre_final, tipo_sql) — solo para modo "tabla nueva"
+    col_defs = []
 
     if mode == "Usar una tabla existente":
         selectable_tables = [t for t in existing_tables if t not in PROTECTED_TABLES]
@@ -164,9 +142,6 @@ if uploaded_file:
             st.warning("Todavía no hay tablas propias creadas. Elige 'Crear una tabla nueva'.")
             st.stop()
         table_name = st.selectbox("Tabla existente", selectable_tables)
-        st.caption(
-            "Los nombres de columna del archivo deben coincidir con los nombres de columna de la tabla."
-        )
         if PROTECTED_TABLES & set(existing_tables):
             st.caption(
                 "🔒 Las tablas del sistema de facturación (`employer_groups`, `invoices`, "
@@ -174,13 +149,44 @@ if uploaded_file:
                 "cargar datos que no correspondan en ellas por error."
             )
 
+        target_columns = {c for c in get_table_columns(table_name) if c not in ("id", "created_at")}
+        matched = [c for c in df.columns if sanitize_name(c) in target_columns]
+        ignored = [c for c in df.columns if sanitize_name(c) not in target_columns]
+
+        if not matched:
+            st.error(
+                "Ninguna columna del archivo coincide con las de esta tabla — revisa que sea "
+                "el archivo correcto para este destino."
+            )
+            st.stop()
+
+        df = df[matched].rename(columns={c: sanitize_name(c) for c in matched})
+        st.success(f"Se van a cargar estas columnas (emparejadas solas): {', '.join(df.columns)}")
+        if ignored:
+            st.caption(f"Se ignoraron del archivo (no existen en la tabla): {', '.join(ignored)}")
+
     else:
+        st.subheader("¿Qué columnas quieres incluir en la tabla nueva?")
+        cols_to_include = st.multiselect(
+            "Desmarca las columnas que NO quieras subir a la base (ej. SSN u otro dato sensible).",
+            options=list(df.columns),
+            default=list(df.columns),
+        )
+        if not cols_to_include:
+            st.warning("Selecciona al menos una columna para continuar.")
+            st.stop()
+        df = df[cols_to_include]
+
         raw_name = st.text_input("Nombre de la tabla nueva (ej. datos_agentes_2026)")
         table_name = sanitize_name(raw_name) if raw_name else None
         if raw_name and table_name and table_name != raw_name.strip().lower():
             st.info(f"El nombre se ajustará a: `{table_name}` (solo minúsculas, sin espacios).")
 
         st.markdown("**Define los atributos (columnas) de la tabla nueva:**")
+        st.caption(
+            "Esto solo hay que hacerlo una vez por tabla — los próximos archivos que uses con "
+            "'Usar una tabla existente' contra esta misma tabla no van a volver a pedir esto."
+        )
         for col in df.columns:
             c1, c2 = st.columns([2, 2])
             with c1:
